@@ -1,54 +1,9 @@
 import AVFoundation
-import CoreMedia
 import Foundation
-import OSLog
 import Vision
 
-enum CameraRunState: Equatable {
-    case idle
-    case requestingPermission
-    case starting
-    case running(deviceName: String)
-    case unavailable(message: String)
-    case denied
-
-    var shortLabel: String {
-        switch self {
-        case .idle:
-            return "Off"
-        case .requestingPermission:
-            return "Waiting for permission"
-        case .starting:
-            return "Starting"
-        case .running:
-            return "Live"
-        case .unavailable:
-            return "Unavailable"
-        case .denied:
-            return "Permission denied"
-        }
-    }
-
-    var detail: String {
-        switch self {
-        case .idle:
-            return "Choose Desk View to start the camera."
-        case .requestingPermission:
-            return "Approve camera access in the macOS prompt."
-        case .starting:
-            return "Looking for Apple's Desk View camera device…"
-        case let .running(deviceName):
-            return "Receiving frames from \(deviceName)."
-        case let .unavailable(message):
-            return message
-        case .denied:
-            return "Enable Camera for DeskInk in System Settings → Privacy & Security."
-        }
-    }
-}
-
-final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate {
-    let session = AVCaptureSession()
+final class CameraController: ObservableObject {
+    var session: AVCaptureSession { frameSource.session }
 
     @Published private(set) var state: CameraRunState = .idle
     @Published private(set) var suggestedPaperCorners: [NormalizedPoint] = []
@@ -57,13 +12,11 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
     @Published private(set) var trackingConfidence = 0.0
     @Published private(set) var penTrackingState: PenTrackingState = .notSeeded
     @Published private(set) var activeVideoAspectRatio = 4.0 / 3.0
+    @Published private(set) var captureDescriptor: CaptureDeviceDescriptor?
 
     var onObservation: ((PenObservation) -> Void)?
 
-    private let sessionQueue = DispatchQueue(label: "com.example.DeskInk.capture.session")
-    private let videoQueue = DispatchQueue(label: "com.example.DeskInk.capture.frames")
-    private let output = AVCaptureVideoDataOutput()
-    private let logger = Logger(subsystem: "com.example.DeskInk", category: "Camera")
+    private let frameSource: FrameSource
 
     private var sequenceHandler = VNSequenceRequestHandler()
     private var trackedObject: VNDetectedObjectObservation?
@@ -71,61 +24,39 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
     private var paperTransform: PerspectiveTransform?
     private var contactState = PenContactStateMachine()
     private var smoothedCameraPoint: NormalizedPoint?
-    private var frameNumber = 0
     private var consecutiveLostFrames = 0
-    private var configured = false
 
-    func start() {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized:
-            configureAndStart()
-        case .notDetermined:
-            publishState(.requestingPermission)
-            AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
-                guard let self else { return }
-                if allowed {
-                    self.configureAndStart()
-                } else {
-                    self.publishState(.denied)
-                }
-            }
-        case .denied, .restricted:
-            publishState(.denied)
-        @unknown default:
-            publishState(.unavailable(message: "macOS returned an unknown camera authorization state."))
+    init(frameSource: FrameSource = AVCaptureFrameSource()) {
+        self.frameSource = frameSource
+        frameSource.onFrame = { [weak self] frame in
+            self?.process(frame)
+        }
+        frameSource.onStateChange = { [weak self] state in
+            self?.state = state
+        }
+        frameSource.onConfigurationChange = { [weak self] descriptor in
+            self?.captureDescriptor = descriptor
+            self?.activeVideoAspectRatio = descriptor.aspectRatio
         }
     }
 
+    func start() {
+        frameSource.start()
+    }
+
     func stop() {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            if self.session.isRunning {
-                self.session.stopRunning()
-            }
-            self.videoQueue.async {
-                self.resetTrackingState()
-            }
-            self.publishState(.idle)
+        frameSource.stop()
+        frameSource.performOnFrameQueue { [weak self] in
+            self?.resetTrackingState()
         }
     }
 
     func retry() {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            if self.session.isRunning {
-                self.session.stopRunning()
-            }
-            self.configured = false
-            self.session.beginConfiguration()
-            self.session.inputs.forEach(self.session.removeInput)
-            self.session.outputs.forEach(self.session.removeOutput)
-            self.session.commitConfiguration()
-            self.configureAndStart()
-        }
+        frameSource.retry()
     }
 
     func setCalibration(_ corners: [NormalizedPoint]) {
-        videoQueue.async { [weak self] in
+        frameSource.performOnFrameQueue { [weak self] in
             guard let self else { return }
             self.paperTransform = PerspectiveTransform.paperTransform(sourceCorners: corners)
             self.contactState.reset()
@@ -133,14 +64,14 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
     }
 
     func clearCalibration() {
-        videoQueue.async { [weak self] in
+        frameSource.performOnFrameQueue { [weak self] in
             self?.paperTransform = nil
             self?.contactState.reset()
         }
     }
 
     func seedPen(at cameraPoint: NormalizedPoint) {
-        videoQueue.async { [weak self] in
+        frameSource.performOnFrameQueue { [weak self] in
             guard let self else { return }
             self.pendingSeedPoint = cameraPoint
             self.trackedObject = nil
@@ -155,94 +86,16 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
     }
 
     func clearPenSeed() {
-        videoQueue.async { [weak self] in
+        frameSource.performOnFrameQueue { [weak self] in
             self?.resetTrackingState()
         }
     }
 
-    private func configureAndStart() {
-        publishState(.starting)
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
+    private func process(_ frame: CapturedVideoFrame) {
+        let pixelBuffer = frame.pixelBuffer
+        let timestamp = frame.presentationTimestamp
 
-            if self.configured {
-                if !self.session.isRunning {
-                    self.session.startRunning()
-                }
-                if let device = (self.session.inputs.first as? AVCaptureDeviceInput)?.device {
-                    self.publishState(.running(deviceName: device.localizedName))
-                }
-                return
-            }
-
-            let discovery = AVCaptureDevice.DiscoverySession(
-                deviceTypes: [.deskViewCamera],
-                mediaType: .video,
-                position: .unspecified
-            )
-
-            guard let device = discovery.devices.first else {
-                self.publishState(.unavailable(
-                    message: "No Desk View device is currently available. Connect a supported iPhone or use a supported built-in Mac camera, then retry—or switch to Simulator."
-                ))
-                return
-            }
-            self.logDiscoveredDevice(device)
-
-            do {
-                let input = try AVCaptureDeviceInput(device: device)
-                self.session.beginConfiguration()
-
-                guard self.session.canAddInput(input) else {
-                    self.session.commitConfiguration()
-                    self.publishState(.unavailable(message: "Desk View is present, but AVFoundation could not add it to the capture session."))
-                    return
-                }
-                self.session.addInput(input)
-                let selectedFormat: AVCaptureDevice.Format
-                do {
-                    selectedFormat = try self.selectCaptureFormat(for: device)
-                } catch {
-                    self.session.commitConfiguration()
-                    throw error
-                }
-                self.publishAspectRatio(for: selectedFormat)
-
-                self.output.alwaysDiscardsLateVideoFrames = true
-                self.output.videoSettings = [
-                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-                ]
-                self.output.setSampleBufferDelegate(self, queue: self.videoQueue)
-
-                guard self.session.canAddOutput(self.output) else {
-                    self.session.commitConfiguration()
-                    self.publishState(.unavailable(message: "Desk View is present, but its video frames could not be opened."))
-                    return
-                }
-                self.session.addOutput(self.output)
-                self.session.commitConfiguration()
-                self.configured = true
-                self.session.startRunning()
-                self.publishState(.running(deviceName: device.localizedName))
-            } catch {
-                self.publishState(.unavailable(message: "Desk View could not start: \(error.localizedDescription)"))
-            }
-        }
-    }
-
-    func captureOutput(
-        _ output: AVCaptureOutput,
-        didOutput sampleBuffer: CMSampleBuffer,
-        from connection: AVCaptureConnection
-    ) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return
-        }
-
-        frameNumber += 1
-        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
-
-        if paperTransform == nil, frameNumber.isMultiple(of: 15) {
+        if paperTransform == nil, frame.index.isMultiple(of: 15) {
             detectPaper(in: pixelBuffer)
         }
 
@@ -422,77 +275,4 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
         }
     }
 
-    private func publishState(_ newState: CameraRunState) {
-        DispatchQueue.main.async { [weak self] in
-            self?.state = newState
-        }
-    }
-
-    private func publishAspectRatio(for format: AVCaptureDevice.Format) {
-        let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-        guard dimensions.width > 0, dimensions.height > 0 else { return }
-        let aspectRatio = Double(dimensions.width) / Double(dimensions.height)
-        DispatchQueue.main.async { [weak self] in
-            self?.activeVideoAspectRatio = aspectRatio
-        }
-    }
-
-    private func logDiscoveredDevice(_ device: AVCaptureDevice) {
-        logger.info("Discovered camera name=\(device.localizedName, privacy: .public) modelID=\(device.modelID, privacy: .public) uniqueID=\(device.uniqueID, privacy: .public)")
-
-        for (index, format) in device.formats.enumerated() {
-            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            let maximumFrameRate = format.videoSupportedFrameRateRanges
-                .map(\.maxFrameRate)
-                .max() ?? 0
-            logger.info("Available format[\(index)] \(dimensions.width)x\(dimensions.height) maxFPS=\(maximumFrameRate, format: .fixed(precision: 2))")
-        }
-    }
-
-    private func selectCaptureFormat(for device: AVCaptureDevice) throws -> AVCaptureDevice.Format {
-        let candidates = device.formats.compactMap { format -> (AVCaptureDevice.Format, CMVideoDimensions, Double, Double, CMTime)? in
-            let eligibleRanges = format.videoSupportedFrameRateRanges.filter { $0.maxFrameRate >= 30 }
-            guard !eligibleRanges.isEmpty else { return nil }
-            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            let maximumFrameRate = eligibleRanges
-                .map(\.maxFrameRate)
-                .max() ?? 0
-            if eligibleRanges.contains(where: { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }) {
-                return (format, dimensions, maximumFrameRate, 30, CMTime(value: 1, timescale: 30))
-            }
-            guard let slowestRange = eligibleRanges.min(by: { $0.minFrameRate < $1.minFrameRate }) else {
-                return nil
-            }
-            return (format, dimensions, maximumFrameRate, slowestRange.minFrameRate, slowestRange.maxFrameDuration)
-        }
-
-        guard let selection = candidates.max(by: { lhs, rhs in
-            let lhsPixels = Double(lhs.1.width) * Double(lhs.1.height)
-            let rhsPixels = Double(rhs.1.width) * Double(rhs.1.height)
-            if lhsPixels != rhsPixels { return lhsPixels < rhsPixels }
-            return lhs.2 < rhs.2
-        }) else {
-            throw CameraSetupError.noThirtyFPSFormat
-        }
-
-        try device.lockForConfiguration()
-        defer { device.unlockForConfiguration() }
-        device.activeFormat = selection.0
-        device.activeVideoMinFrameDuration = selection.4
-        device.activeVideoMaxFrameDuration = selection.4
-
-        logger.info("Selected format \(selection.1.width)x\(selection.1.height) targetFPS=\(selection.3, format: .fixed(precision: 2)) maxFPS=\(selection.2, format: .fixed(precision: 2))")
-        return selection.0
-    }
-}
-
-private enum CameraSetupError: LocalizedError {
-    case noThirtyFPSFormat
-
-    var errorDescription: String? {
-        switch self {
-        case .noThirtyFPSFormat:
-            return "The Desk View camera did not report a video format capable of 30 frames per second."
-        }
-    }
 }
