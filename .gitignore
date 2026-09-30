@@ -7,6 +7,10 @@ build/
 outputs/
 work/
 
+# Explicitly local-only camera recording sessions
+*.deskink-session/
+DeskInk Recordings/
+
 # SwiftPM / Xcode user state
 .swiftpm/
 Package.resolved
