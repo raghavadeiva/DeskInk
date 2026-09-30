@@ -35,6 +35,8 @@ contents_path="$app_path/Contents"
 mkdir -p "$contents_path/MacOS" "$contents_path/Resources"
 cp "$binary_path" "$contents_path/MacOS/DeskInk"
 cp "$project_root/Resources/Info.plist" "$contents_path/Info.plist"
+git_hash="$(git rev-parse --short=12 HEAD 2>/dev/null || print unknown)"
+/usr/libexec/PlistBuddy -c "Set :DeskInkGitCommit $git_hash" "$contents_path/Info.plist"
 
 codesign --force --sign - \
   --entitlements "$project_root/Resources/DeskInk.entitlements" \

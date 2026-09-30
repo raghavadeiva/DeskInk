@@ -4,6 +4,8 @@ import Foundation
 struct PerspectiveTransform: Equatable, Sendable {
     private let values: [Double]
 
+    var rowMajorValues: [Double] { values }
+
     private init(values: [Double]) {
         self.values = values
     }

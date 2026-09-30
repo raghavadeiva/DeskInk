@@ -23,6 +23,7 @@ final class CameraController: ObservableObject {
     private var trackedObject: VNDetectedObjectObservation?
     private var pendingSeedPoint: NormalizedPoint?
     private var paperTransform: PerspectiveTransform?
+    private var calibrationCorners: [NormalizedPoint] = []
     private var contactState = PenContactStateMachine()
     private var smoothedCameraPoint: NormalizedPoint?
     private var consecutiveLostFrames = 0
@@ -66,6 +67,7 @@ final class CameraController: ObservableObject {
     func setCalibration(_ corners: [NormalizedPoint]) {
         frameSource.performOnFrameQueue { [weak self] in
             guard let self else { return }
+            self.calibrationCorners = corners
             self.paperTransform = PerspectiveTransform.paperTransform(sourceCorners: corners)
             self.contactState.reset()
         }
@@ -73,6 +75,7 @@ final class CameraController: ObservableObject {
 
     func clearCalibration() {
         frameSource.performOnFrameQueue { [weak self] in
+            self?.calibrationCorners.removeAll()
             self?.paperTransform = nil
             self?.contactState.reset()
         }

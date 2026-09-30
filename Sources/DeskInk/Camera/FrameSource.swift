@@ -48,6 +48,7 @@ struct CaptureDeviceDescriptor: Codable, Equatable, Sendable {
     let height: Int
     let targetFrameRate: Double
     let maximumFrameRate: Double
+    let pixelFormat: String
 
     var aspectRatio: Double {
         guard height > 0 else { return 4.0 / 3.0 }
@@ -245,7 +246,8 @@ final class AVCaptureFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutpu
                     width: Int(selection.dimensions.width),
                     height: Int(selection.dimensions.height),
                     targetFrameRate: selection.targetFrameRate,
-                    maximumFrameRate: selection.maximumFrameRate
+                    maximumFrameRate: selection.maximumFrameRate,
+                    pixelFormat: "32BGRA"
                 )
                 self.publishConfiguration(descriptor)
                 self.session.startRunning()
