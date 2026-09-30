@@ -55,6 +55,7 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
     @Published private(set) var trackedPaperPoint: NormalizedPoint?
     @Published private(set) var trackingConfidence = 0.0
     @Published private(set) var penTrackingState: PenTrackingState = .notSeeded
+    @Published private(set) var activeVideoAspectRatio = 4.0 / 3.0
 
     var onObservation: ((PenObservation) -> Void)?
 
@@ -196,6 +197,7 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
                     return
                 }
                 self.session.addInput(input)
+                self.publishAspectRatio(for: device.activeFormat)
 
                 self.output.alwaysDiscardsLateVideoFrames = true
                 self.output.videoSettings = [
@@ -414,6 +416,15 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
     private func publishState(_ newState: CameraRunState) {
         DispatchQueue.main.async { [weak self] in
             self?.state = newState
+        }
+    }
+
+    private func publishAspectRatio(for format: AVCaptureDevice.Format) {
+        let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        guard dimensions.width > 0, dimensions.height > 0 else { return }
+        let aspectRatio = Double(dimensions.width) / Double(dimensions.height)
+        DispatchQueue.main.async { [weak self] in
+            self?.activeVideoAspectRatio = aspectRatio
         }
     }
 }

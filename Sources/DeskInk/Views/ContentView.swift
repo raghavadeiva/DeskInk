@@ -292,7 +292,7 @@ private struct SetupSidebar: View {
                 interaction: model.cameraInteraction,
                 onClick: model.handleCameraClick
             )
-            .aspectRatio(4.0 / 3.0, contentMode: .fit)
+            .aspectRatio(camera.activeVideoAspectRatio, contentMode: .fit)
             .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay {
