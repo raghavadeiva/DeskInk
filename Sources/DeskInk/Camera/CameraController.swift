@@ -17,6 +17,7 @@ final class CameraController: ObservableObject {
     var onObservation: ((PenObservation) -> Void)?
 
     private let frameSource: FrameSource
+    private let sessionRecorder: SessionRecorder
     let latencyMonitor: LatencyMonitor
 
     private var sequenceHandler = VNSequenceRequestHandler()
@@ -30,10 +31,12 @@ final class CameraController: ObservableObject {
 
     init(
         frameSource: FrameSource = AVCaptureFrameSource(),
-        latencyMonitor: LatencyMonitor = LatencyMonitor()
+        latencyMonitor: LatencyMonitor = LatencyMonitor(),
+        sessionRecorder: SessionRecorder = SessionRecorder()
     ) {
         self.frameSource = frameSource
         self.latencyMonitor = latencyMonitor
+        self.sessionRecorder = sessionRecorder
         frameSource.onFrame = { [weak self] frame in
             self?.process(frame)
         }
@@ -133,19 +136,19 @@ final class CameraController: ObservableObject {
 
         guard let trackedObject else {
             latencyMonitor.markTrackerResult(traceID: frame.traceID)
-            publishObservation(
-                PenObservation(
-                    traceID: frame.traceID,
-                    rawCameraPoint: nil,
-                    cameraPoint: nil,
-                    rawPaperPoint: nil,
-                    paperPoint: nil,
-                    confidence: 0,
-                    trackerKind: "vision",
-                    inferredDown: contactState.update(point: nil, confidence: 0, timestamp: timestamp),
-                    timestamp: timestamp
-                )
+            let observation = PenObservation(
+                traceID: frame.traceID,
+                rawCameraPoint: nil,
+                cameraPoint: nil,
+                rawPaperPoint: nil,
+                paperPoint: nil,
+                confidence: 0,
+                trackerKind: "vision",
+                inferredDown: contactState.update(point: nil, confidence: 0, timestamp: timestamp),
+                timestamp: timestamp
             )
+            record(frame, observation: observation)
+            publishObservation(observation)
             return
         }
 
@@ -194,19 +197,19 @@ final class CameraController: ObservableObject {
             )
 
             latencyMonitor.markTrackerResult(traceID: frame.traceID)
-            publishObservation(
-                PenObservation(
-                    traceID: frame.traceID,
-                    rawCameraPoint: rawPoint,
-                    cameraPoint: filteredPoint,
-                    rawPaperPoint: rawMappedPoint,
-                    paperPoint: pointOnPaper,
-                    confidence: confidence,
-                    trackerKind: "vision",
-                    inferredDown: isDown,
-                    timestamp: timestamp
-                )
+            let observation = PenObservation(
+                traceID: frame.traceID,
+                rawCameraPoint: rawPoint,
+                cameraPoint: filteredPoint,
+                rawPaperPoint: rawMappedPoint,
+                paperPoint: pointOnPaper,
+                confidence: confidence,
+                trackerKind: "vision",
+                inferredDown: isDown,
+                timestamp: timestamp
             )
+            record(frame, observation: observation)
+            publishObservation(observation)
         } catch {
             handleWeakTracking(result: nil, frame: frame, timestamp: timestamp)
         }
@@ -273,17 +276,39 @@ final class CameraController: ObservableObject {
             NormalizedPoint(x: $0.boundingBox.midX, y: 1 - $0.boundingBox.midY)
         }
         latencyMonitor.markTrackerResult(traceID: frame.traceID)
-        publishObservation(
-            PenObservation(
+        let observation = PenObservation(
+            traceID: frame.traceID,
+            rawCameraPoint: rawPoint,
+            cameraPoint: nil,
+            rawPaperPoint: rawPoint.flatMap { paperTransform?.applying(to: $0) },
+            paperPoint: nil,
+            confidence: Double(result?.confidence ?? 0),
+            trackerKind: "vision",
+            inferredDown: down,
+            timestamp: timestamp
+        )
+        record(frame, observation: observation)
+        publishObservation(observation)
+    }
+
+    private func record(_ frame: CapturedVideoFrame, observation: PenObservation) {
+        sessionRecorder.stageFrame(
+            SessionFrameStage(
                 traceID: frame.traceID,
-                rawCameraPoint: rawPoint,
-                cameraPoint: nil,
-                rawPaperPoint: rawPoint.flatMap { paperTransform?.applying(to: $0) },
-                paperPoint: nil,
-                confidence: Double(result?.confidence ?? 0),
-                trackerKind: "vision",
-                inferredDown: down,
-                timestamp: timestamp
+                presentationTime: frame.presentationTime,
+                callbackHostTimestamp: frame.callbackHostTimestamp,
+                presentationHostTimestamp: frame.presentationHostTimestamp,
+                clockRelation: frame.clockRelation,
+                trackerOutput: SessionTrackerOutput(
+                    rawCameraPoint: observation.rawCameraPoint,
+                    cameraPoint: observation.cameraPoint,
+                    confidence: observation.confidence,
+                    trackerKind: observation.trackerKind
+                ),
+                homography: paperTransform?.rowMajorValues,
+                calibrationCorners: calibrationCorners,
+                mappedPaperPoint: observation.rawPaperPoint,
+                pixelBuffer: frame.pixelBuffer
             )
         )
     }

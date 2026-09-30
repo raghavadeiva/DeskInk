@@ -4,6 +4,20 @@ import PDFKit
 import UniformTypeIdentifiers
 
 @MainActor
+final class SessionReviewPresentation: Identifiable {
+    let id = UUID()
+    let sessionURL: URL
+    let store: SessionReviewStore
+    let usesSecurityScope: Bool
+
+    init(sessionURL: URL, usesSecurityScope: Bool) throws {
+        self.sessionURL = sessionURL
+        self.usesSecurityScope = usesSecurityScope
+        store = try SessionReviewStore(sessionURL: sessionURL)
+    }
+}
+
+@MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var document: PDFDocument?
     @Published private(set) var documentName = "No PDF open"
@@ -17,20 +31,37 @@ final class AppModel: ObservableObject {
     @Published var inkColor: InkColorChoice = .blue
     @Published var calibrationCorners: [NormalizedPoint] = []
     @Published var cameraInteraction: CameraInteraction = .idle
+    @Published var accuracyPaperFormat: PaperFormat = .letter
+    @Published var recordingUserMetadata = SessionUserMetadata()
+    @Published private(set) var gridAccuracySession: GridAccuracySession?
+    @Published private(set) var gridAccuracyStatus = "Print a grid, calibrate the sheet, then start."
+    @Published private(set) var isSessionRecording = false
+    @Published private(set) var recordingStatus = "Recording is off."
+    @Published private(set) var lastRecordingSummary: SessionRecordingSummary?
+    @Published private(set) var sessionReviewPresentation: SessionReviewPresentation?
     @Published private(set) var isSpacePressed = false
     @Published var presentedError: String?
     @Published private(set) var statusMessage = "Open a PDF to begin."
 
     let latencyMonitor: LatencyMonitor
     let camera: CameraController
+    let sessionRecorder: SessionRecorder
 
     private var spaceKeyMonitor: SpaceKeyMonitor?
     private var automaticPreRoll: [NormalizedPoint] = []
+    private var gridCalibrationMetadata = GridCalibrationMetadata()
+    private var recordingParentURL: URL?
+    private var recordingUsesSecurityScope = false
 
     init() {
         let latencyMonitor = LatencyMonitor()
+        let sessionRecorder = SessionRecorder()
         self.latencyMonitor = latencyMonitor
-        camera = CameraController(latencyMonitor: latencyMonitor)
+        self.sessionRecorder = sessionRecorder
+        camera = CameraController(
+            latencyMonitor: latencyMonitor,
+            sessionRecorder: sessionRecorder
+        )
         camera.onObservation = { [weak self] observation in
             self?.consume(observation)
         }
@@ -67,6 +98,11 @@ final class AppModel: ObservableObject {
         !strokes.isEmpty || activeStroke != nil
     }
 
+    var isGridAccuracyTestActive: Bool {
+        guard let gridAccuracySession else { return false }
+        return !gridAccuracySession.isComplete
+    }
+
     func openPDF(at url: URL) {
         let accessed = url.startAccessingSecurityScopedResource()
         defer {
@@ -96,10 +132,16 @@ final class AppModel: ObservableObject {
 
     func setInputMode(_ mode: InputMode) {
         guard inputMode != mode else { return }
+        if mode != .deskView, isSessionRecording {
+            stopSessionRecording(reason: "inputModeChanged")
+        }
         finishActiveStroke()
         automaticPreRoll.removeAll()
         inputMode = mode
         cameraInteraction = .idle
+        if mode != .deskView {
+            cancelGridAccuracyTest()
+        }
 
         switch mode {
         case .deskView:
@@ -114,6 +156,7 @@ final class AppModel: ObservableObject {
     }
 
     func beginCalibration() {
+        cancelGridAccuracyTest()
         finishActiveStroke()
         automaticPreRoll.removeAll()
         calibrationCorners.removeAll()
@@ -128,6 +171,7 @@ final class AppModel: ObservableObject {
     }
 
     func resetCalibration() {
+        cancelGridAccuracyTest()
         finishActiveStroke()
         automaticPreRoll.removeAll()
         calibrationCorners.removeAll()
@@ -252,6 +296,223 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func generateAccuracyGrid(_ format: PaperFormat) {
+        do {
+            let data = try GridTestPDFGenerator.makePDF(format: format)
+            let savePanel = NSSavePanel()
+            savePanel.allowedContentTypes = [.pdf]
+            savePanel.canCreateDirectories = true
+            savePanel.nameFieldStringValue = "DeskInk-Accuracy-Grid-\(format.displayName).pdf"
+            savePanel.title = "Save Printable Accuracy Grid"
+            savePanel.begin { [weak self] response in
+                guard response == .OK, let destination = savePanel.url else { return }
+                do {
+                    try data.write(to: destination, options: .atomic)
+                    Task { @MainActor in
+                        self?.statusMessage = "Saved \(format.displayName) accuracy grid. Print at 100% / Actual Size."
+                    }
+                } catch {
+                    Task { @MainActor in
+                        self?.presentedError = "The accuracy grid could not be saved. \(error.localizedDescription)"
+                    }
+                }
+            }
+        } catch {
+            presentedError = "The accuracy grid could not be generated. \(error.localizedDescription)"
+        }
+    }
+
+    func startGridAccuracyTest() {
+        guard inputMode == .deskView else {
+            presentedError = "Switch to Desk View before starting the grid accuracy test."
+            return
+        }
+        guard isCalibrated else {
+            presentedError = "Calibrate the printed grid sheet before starting the test."
+            return
+        }
+        guard camera.penTrackingState == .tracking else {
+            presentedError = "Select the pen tip and wait for Tracking on paper before starting the test."
+            return
+        }
+
+        finishActiveStroke()
+        penDownMode = .holdSpace
+        gridAccuracySession = GridAccuracySession(paperFormat: accuracyPaperFormat)
+        let transform = PerspectiveTransform.paperTransform(sourceCorners: calibrationCorners)
+        gridCalibrationMetadata = GridCalibrationMetadata(
+            calibrationTimestamp: Date(),
+            cameraCorners: calibrationCorners,
+            homography: transform?.rowMajorValues ?? [],
+            additionalFields: [
+                "camera_name": camera.captureDescriptor?.localizedName ?? "unknown",
+                "capture_format": camera.captureDescriptor.map { "\($0.width)x\($0.height) @ \($0.targetFrameRate) fps" } ?? "unknown"
+            ]
+        )
+        gridAccuracyStatus = "Touch cross 1 and hold Space for one second."
+        statusMessage = "Accuracy test active—normal PDF ink is paused."
+    }
+
+    func cancelGridAccuracyTest() {
+        guard gridAccuracySession != nil else { return }
+        gridAccuracySession = nil
+        gridAccuracyStatus = "Test cancelled. Recalibrate before the next run."
+        statusMessage = hasDocument ? "Grid test cancelled. PDF ink is active again." : "Grid test cancelled."
+    }
+
+    func exportGridAccuracyCSV() {
+        guard let session = gridAccuracySession, !session.measurements.isEmpty else {
+            presentedError = "Record at least one grid point before exporting results."
+            return
+        }
+        let data = GridAccuracyCSVExporter.data(
+            paperFormat: session.paperFormat,
+            measurements: session.measurements,
+            calibration: gridCalibrationMetadata
+        )
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.commaSeparatedText]
+        savePanel.canCreateDirectories = true
+        savePanel.nameFieldStringValue = "DeskInk-Accuracy-\(session.paperFormat.displayName).csv"
+        savePanel.title = "Export Grid Accuracy Results"
+        savePanel.begin { [weak self] response in
+            guard response == .OK, let destination = savePanel.url else { return }
+            do {
+                try data.write(to: destination, options: .atomic)
+                Task { @MainActor in
+                    self?.statusMessage = "Exported grid accuracy results."
+                }
+            } catch {
+                Task { @MainActor in
+                    self?.presentedError = "The grid accuracy CSV could not be saved. \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func setSessionRecordingEnabled(_ enabled: Bool) {
+        if enabled {
+            chooseRecordingFolderAndStart()
+        } else {
+            stopSessionRecording(reason: "userStopped")
+        }
+    }
+
+    private func chooseRecordingFolderAndStart() {
+        guard !isSessionRecording else { return }
+        guard inputMode == .deskView else {
+            presentedError = "Switch to Desk View before recording a camera session."
+            return
+        }
+        guard let captureDescriptor = camera.captureDescriptor else {
+            presentedError = "Wait until Desk View is live before starting a recording."
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Folder for the Local Recording"
+        panel.prompt = "Start Recording"
+        panel.message = "DeskInk will create one local .deskink-session folder here. Nothing is uploaded."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.begin { [weak self] response in
+            guard response == .OK, let parentURL = panel.url else { return }
+            Task { @MainActor in
+                self?.startSessionRecording(in: parentURL, captureDescriptor: captureDescriptor)
+            }
+        }
+    }
+
+    private func startSessionRecording(
+        in parentURL: URL,
+        captureDescriptor: CaptureDeviceDescriptor
+    ) {
+        let accessed = parentURL.startAccessingSecurityScopedResource()
+        do {
+            let metadata = SessionRecorderMetadata(
+                appVersion: Bundle.main.object(
+                    forInfoDictionaryKey: "CFBundleShortVersionString"
+                ) as? String ?? "development",
+                gitHash: Bundle.main.object(forInfoDictionaryKey: "DeskInkGitCommit") as? String
+                    ?? "unknown",
+                captureDevice: captureDescriptor,
+                user: recordingUserMetadata
+            )
+            let sessionURL = try sessionRecorder.start(in: parentURL, metadata: metadata)
+            recordingParentURL = parentURL
+            recordingUsesSecurityScope = accessed
+            isSessionRecording = true
+            lastRecordingSummary = nil
+            recordingStatus = "Recording locally to \(sessionURL.lastPathComponent)."
+            statusMessage = "Session recording started."
+        } catch {
+            if accessed {
+                parentURL.stopAccessingSecurityScopedResource()
+            }
+            presentedError = "The session recording could not start. \(error.localizedDescription)"
+        }
+    }
+
+    func stopSessionRecording(reason: String = "userStopped") {
+        guard isSessionRecording || sessionRecorder.isRecording else { return }
+        finishActiveStroke()
+        defer {
+            if recordingUsesSecurityScope {
+                recordingParentURL?.stopAccessingSecurityScopedResource()
+            }
+            recordingParentURL = nil
+            recordingUsesSecurityScope = false
+            isSessionRecording = false
+        }
+
+        do {
+            let summary = try sessionRecorder.stop(reason: reason)
+            lastRecordingSummary = summary
+            recordingStatus = "Saved \(summary.frameCount) frames to \(summary.sessionURL.lastPathComponent)."
+            statusMessage = "Session recording saved locally."
+        } catch {
+            recordingStatus = "Recording stopped with an error."
+            presentedError = "The session recording could not be finalized. \(error.localizedDescription)"
+        }
+    }
+
+    func chooseSessionForReview() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a DeskInk Session"
+        panel.prompt = "Review Session"
+        panel.message = "Choose a .deskink-session folder. Corrections are appended to a separate local file."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.begin { [weak self] response in
+            guard response == .OK, let sessionURL = panel.url else { return }
+            Task { @MainActor in
+                let accessed = sessionURL.startAccessingSecurityScopedResource()
+                do {
+                    self?.sessionReviewPresentation = try SessionReviewPresentation(
+                        sessionURL: sessionURL,
+                        usesSecurityScope: accessed
+                    )
+                } catch {
+                    if accessed {
+                        sessionURL.stopAccessingSecurityScopedResource()
+                    }
+                    self?.presentedError = "That session could not be opened. \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func closeSessionReview() {
+        guard let presentation = sessionReviewPresentation else { return }
+        if presentation.usesSecurityScope {
+            presentation.sessionURL.stopAccessingSecurityScopedResource()
+        }
+        sessionReviewPresentation = nil
+    }
+
     private var suggestedExportName: String {
         let base = (documentName as NSString).deletingPathExtension
         return base.isEmpty ? "Annotated.pdf" : "\(base)-annotated.pdf"
@@ -277,12 +538,33 @@ final class AppModel: ObservableObject {
     private func consume(_ observation: PenObservation) {
         let visiblePointCountBefore = currentVisibleInkPointCount
         defer {
-            if currentVisibleInkPointCount > visiblePointCountBefore {
+            let acceptedForInk = currentVisibleInkPointCount > visiblePointCountBefore
+            sessionRecorder.finalizeFrame(
+                SessionFrameDecision(
+                    traceID: observation.traceID,
+                    decisionHostTimestamp: LatencyMonitor.hostTimestampNow(),
+                    inferredPenDown: observation.inferredDown,
+                    acceptedForInk: acceptedForInk,
+                    activeStrokeID: activeStroke?.id
+                )
+            )
+            if acceptedForInk {
                 renderTicket = observation.traceID
             } else {
                 latencyMonitor.markNotRendered(traceID: observation.traceID)
             }
         }
+        if var gridSession = gridAccuracySession, !gridSession.isComplete {
+            if let point = observation.rawPaperPoint {
+                let reduction = gridSession.reduce(
+                    .mappedPoint(point, timestamp: LatencyMonitor.hostTimestampNow())
+                )
+                gridAccuracySession = gridSession
+                handleGridAccuracyReduction(reduction)
+            }
+            return
+        }
+
         guard inputMode == .deskView, hasDocument else { return }
 
         guard let point = observation.paperPoint else {
@@ -321,6 +603,7 @@ final class AppModel: ObservableObject {
                 points: startingPoints,
                 color: inkColor
             )
+            recordActiveStrokeBoundary(.began)
             statusMessage = "Ink down—recording on page \(currentPageIndex + 1)."
             return
         }
@@ -332,6 +615,7 @@ final class AppModel: ObservableObject {
                 points: [point],
                 color: inkColor
             )
+            recordActiveStrokeBoundary(.began)
             return
         }
 
@@ -346,9 +630,25 @@ final class AppModel: ObservableObject {
         guard let activeStroke else { return }
         if !activeStroke.points.isEmpty {
             strokes.append(activeStroke)
+            sessionRecorder.recordStrokeBoundary(
+                .ended,
+                strokeID: activeStroke.id,
+                pageIndex: activeStroke.pageIndex,
+                hostTimestamp: LatencyMonitor.hostTimestampNow()
+            )
             statusMessage = "Recorded \(strokes.count) stroke\(strokes.count == 1 ? "" : "s")."
         }
         self.activeStroke = nil
+    }
+
+    private func recordActiveStrokeBoundary(_ boundary: SessionStrokeBoundary) {
+        guard let activeStroke else { return }
+        sessionRecorder.recordStrokeBoundary(
+            boundary,
+            strokeID: activeStroke.id,
+            pageIndex: activeStroke.pageIndex,
+            hostTimestamp: LatencyMonitor.hostTimestampNow()
+        )
     }
 
     private func spaceKeyChanged(
@@ -358,8 +658,58 @@ final class AppModel: ObservableObject {
         source: SpaceKeyEventSource
     ) {
         isSpacePressed = pressed
+        sessionRecorder.recordSpaceState(
+            isDown: pressed,
+            eventTimestamp: eventTimestamp,
+            hostTimestamp: hostTimestamp,
+            source: source
+        )
+        if var gridSession = gridAccuracySession, !gridSession.isComplete {
+            let reduction = gridSession.reduce(
+                pressed ? .spaceDown(timestamp: hostTimestamp) : .spaceUp(timestamp: hostTimestamp)
+            )
+            gridAccuracySession = gridSession
+            handleGridAccuracyReduction(reduction)
+        }
         if !pressed, penDownMode == .holdSpace {
             finishActiveStroke()
+        }
+    }
+
+    private func handleGridAccuracyReduction(_ reduction: GridAccuracyReduction) {
+        switch reduction {
+        case .ignored:
+            break
+        case let .holdStarted(targetIndex):
+            gridAccuracyStatus = "Holding on cross \(targetIndex + 1)…"
+        case let .holdProgress(elapsed, sampleCount):
+            gridAccuracyStatus = String(
+                format: "Hold still… %.1f s · %d samples",
+                min(elapsed, GridAccuracySession.minimumHoldDuration),
+                sampleCount
+            )
+        case let .measurementRecorded(measurement):
+            gridAccuracyStatus = "Captured cross \(measurement.target.index + 1). Release Space."
+        case .attemptCancelled:
+            let targetNumber = (gridAccuracySession?.currentTarget?.index ?? 0) + 1
+            gridAccuracyStatus = "Hold was too short. Retry cross \(targetNumber)."
+        case let .readyForTarget(target):
+            gridAccuracyStatus = "Touch cross \(target.index + 1) and hold Space for one second."
+        case .completed:
+            guard let statistics = gridAccuracySession?.statistics,
+                  let mean = statistics.meanErrorMM,
+                  let p95 = statistics.p95ErrorMM,
+                  let maximum = statistics.maxErrorMM else {
+                gridAccuracyStatus = "Accuracy test complete."
+                return
+            }
+            gridAccuracyStatus = String(
+                format: "Complete — mean %.2f mm · p95 %.2f mm · max %.2f mm",
+                mean,
+                p95,
+                maximum
+            )
+            statusMessage = "Accuracy test complete. Export the CSV before recalibrating."
         }
     }
 

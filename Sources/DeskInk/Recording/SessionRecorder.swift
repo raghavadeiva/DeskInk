@@ -199,13 +199,22 @@ final class SessionRecorder {
         }
     }
 
-    func recordSpaceState(isDown: Bool, hostTimestamp: TimeInterval) {
+    func recordSpaceState(
+        isDown: Bool,
+        eventTimestamp: TimeInterval? = nil,
+        hostTimestamp: TimeInterval,
+        source: SpaceKeyEventSource? = nil
+    ) {
         stateQueue.async { [weak self] in
             guard let self, let session = self.activeSession, !session.isStopping else { return }
             _ = self.appendEvent(
                 type: "spaceState",
                 hostTimestamp: hostTimestamp,
-                payload: SpaceStatePayload(isDown: isDown),
+                payload: SpaceStatePayload(
+                    isDown: isDown,
+                    eventTimestamp: eventTimestamp,
+                    source: source
+                ),
                 to: session
             )
         }
@@ -714,6 +723,8 @@ private struct SessionLifecyclePayload: Encodable {
 
 private struct SpaceStatePayload: Encodable {
     let isDown: Bool
+    let eventTimestamp: TimeInterval?
+    let source: SpaceKeyEventSource?
 }
 
 private struct StrokeBoundaryPayload: Encodable {

@@ -91,8 +91,18 @@ struct SessionRecorderTests {
                 activeStrokeID: strokeID
             )
         )
-        recorder.recordSpaceState(isDown: true, hostTimestamp: 100.10)
-        recorder.recordSpaceState(isDown: false, hostTimestamp: 100.90)
+        recorder.recordSpaceState(
+            isDown: true,
+            eventTimestamp: 9.75,
+            hostTimestamp: 100.10,
+            source: .keyDown
+        )
+        recorder.recordSpaceState(
+            isDown: false,
+            eventTimestamp: 10.55,
+            hostTimestamp: 100.90,
+            source: .keyUp
+        )
         recorder.recordStrokeBoundary(.began, strokeID: strokeID, pageIndex: 0, hostTimestamp: 100.28)
         recorder.recordStrokeBoundary(.ended, strokeID: strokeID, pageIndex: 0, hostTimestamp: 100.88)
 
@@ -124,6 +134,9 @@ struct SessionRecorderTests {
         let spaces = events.filter { $0["type"] as? String == "spaceState" }
         #expect(spaces.count == 2)
         #expect(spaces.compactMap { $0["hostTimestamp"] as? Double } == [100.10, 100.90])
+        let spacePayloads = spaces.compactMap { $0["payload"] as? [String: Any] }
+        #expect(spacePayloads.compactMap { $0["eventTimestamp"] as? Double } == [9.75, 10.55])
+        #expect(spacePayloads.compactMap { $0["source"] as? String } == ["keyDown", "keyUp"])
         let boundaries = events.filter { $0["type"] as? String == "strokeBoundary" }
         #expect(boundaries.count == 2)
 

@@ -49,6 +49,16 @@ struct ContentView: View {
         } message: {
             Text(model.presentedError ?? "Unknown error")
         }
+        .sheet(
+            isPresented: Binding(
+                get: { model.sessionReviewPresentation != nil },
+                set: { if !$0 { model.closeSessionReview() } }
+            )
+        ) {
+            if let presentation = model.sessionReviewPresentation {
+                SessionReviewView(store: presentation.store)
+            }
+        }
     }
 
     private var workspaceToolbar: some View {
@@ -90,6 +100,16 @@ struct ContentView: View {
             .accessibilityLabel("Next PDF page")
 
             Spacer()
+
+            if model.isSessionRecording {
+                Label("REC", systemImage: "record.circle.fill")
+                    .font(.caption.monospaced().weight(.bold))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.red.opacity(0.1), in: Capsule())
+                    .accessibilityLabel("Local session recording is active")
+            }
 
             Text(inkCountLabel)
                 .font(.caption.monospacedDigit())
@@ -179,6 +199,22 @@ struct ContentView: View {
                 .padding(18)
                 .allowsHitTesting(false)
             }
+
+            if model.isGridAccuracyTestActive {
+                VStack {
+                    HStack {
+                        Label("Accuracy test — normal PDF ink is paused", systemImage: "ruler")
+                            .font(.callout.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.ultraThickMaterial, in: Capsule())
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .padding(18)
+                .allowsHitTesting(false)
+            }
         }
         .background(Color(nsColor: .underPageBackgroundColor))
     }
@@ -233,6 +269,8 @@ private struct SetupSidebar: View {
                     cameraPreview
                     calibrationSection
                     trackingSection
+                    recordingSection
+                    gridAccuracySection
                     LatencyDebugPanel(monitor: model.latencyMonitor)
                 } else {
                     simulatorSection
@@ -431,6 +469,111 @@ private struct SetupSidebar: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.top, 4)
+        }
+    }
+
+    private var gridAccuracySection: some View {
+        GroupBox("Grid accuracy test") {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Paper", selection: $model.accuracyPaperFormat) {
+                    ForEach(PaperFormat.allCases) { format in
+                        Text(format.displayName).tag(format)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(model.isGridAccuracyTestActive)
+
+                Button("Generate Printable Grid…") {
+                    model.generateAccuracyGrid(model.accuracyPaperFormat)
+                }
+
+                if let session = model.gridAccuracySession {
+                    ProgressView(
+                        value: Double(session.measurements.count),
+                        total: Double(session.targets.count)
+                    )
+                    Text("\(session.measurements.count) of \(session.targets.count) crosses recorded")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(model.gridAccuracyStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    if model.isGridAccuracyTestActive {
+                        Button("Cancel Test", role: .destructive) {
+                            model.cancelGridAccuracyTest()
+                        }
+                    } else {
+                        Button(model.gridAccuracySession == nil ? "Start Test" : "Start New Test") {
+                            model.startGridAccuracyTest()
+                        }
+                        .disabled(!model.isCalibrated || camera.penTrackingState != .tracking)
+                    }
+
+                    if let session = model.gridAccuracySession, !session.measurements.isEmpty {
+                        Button("Export CSV…") {
+                            model.exportGridAccuracyCSV()
+                        }
+                    }
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var recordingSection: some View {
+        GroupBox("Session recording") {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Local only · never uploaded", systemImage: "lock.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Group {
+                    TextField("Pen or pencil type", text: $model.recordingUserMetadata.penOrPencilType)
+                    TextField("Paper", text: $model.recordingUserMetadata.paper)
+                    TextField("Lighting", text: $model.recordingUserMetadata.lighting)
+                    TextField("Desk surface", text: $model.recordingUserMetadata.deskSurface)
+                    TextField("Handedness", text: $model.recordingUserMetadata.handedness)
+                    TextField("Notes", text: $model.recordingUserMetadata.notes)
+                }
+                .disabled(model.isSessionRecording)
+
+                Toggle(
+                    "Record session",
+                    isOn: Binding(
+                        get: { model.isSessionRecording },
+                        set: { model.setSessionRecordingEnabled($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+                .disabled(camera.captureDescriptor == nil && !model.isSessionRecording)
+
+                Button("Review Recorded Session…") {
+                    model.chooseSessionForReview()
+                }
+                .disabled(model.isSessionRecording)
+
+                Text(model.recordingStatus)
+                    .font(.caption)
+                    .foregroundStyle(model.isSessionRecording ? .red : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let summary = model.lastRecordingSummary {
+                    Text(
+                        "\(summary.mediaFileCount) images · "
+                            + "\(summary.droppedMediaCount) media drops · "
+                            + "\(summary.issueCount) recorder issues"
+                    )
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
             .padding(.top, 4)
         }
     }
