@@ -38,7 +38,7 @@ enum CameraRunState: Equatable {
         case .starting:
             return "Looking for Apple's Desk View camera device…"
         case let .running(deviceName):
-            return "Receiving \(deviceName) at up to 30 frames per second."
+            return "Receiving frames from \(deviceName)."
         case let .unavailable(message):
             return message
         case .denied:
@@ -192,7 +192,6 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
             do {
                 let input = try AVCaptureDeviceInput(device: device)
                 self.session.beginConfiguration()
-                self.session.sessionPreset = .high
 
                 guard self.session.canAddInput(input) else {
                     self.session.commitConfiguration()
@@ -200,7 +199,14 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
                     return
                 }
                 self.session.addInput(input)
-                self.publishAspectRatio(for: device.activeFormat)
+                let selectedFormat: AVCaptureDevice.Format
+                do {
+                    selectedFormat = try self.selectCaptureFormat(for: device)
+                } catch {
+                    self.session.commitConfiguration()
+                    throw error
+                }
+                self.publishAspectRatio(for: selectedFormat)
 
                 self.output.alwaysDiscardsLateVideoFrames = true
                 self.output.videoSettings = [
@@ -440,6 +446,53 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
                 .map(\.maxFrameRate)
                 .max() ?? 0
             logger.info("Available format[\(index)] \(dimensions.width)x\(dimensions.height) maxFPS=\(maximumFrameRate, format: .fixed(precision: 2))")
+        }
+    }
+
+    private func selectCaptureFormat(for device: AVCaptureDevice) throws -> AVCaptureDevice.Format {
+        let candidates = device.formats.compactMap { format -> (AVCaptureDevice.Format, CMVideoDimensions, Double, Double, CMTime)? in
+            let eligibleRanges = format.videoSupportedFrameRateRanges.filter { $0.maxFrameRate >= 30 }
+            guard !eligibleRanges.isEmpty else { return nil }
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let maximumFrameRate = eligibleRanges
+                .map(\.maxFrameRate)
+                .max() ?? 0
+            if eligibleRanges.contains(where: { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }) {
+                return (format, dimensions, maximumFrameRate, 30, CMTime(value: 1, timescale: 30))
+            }
+            guard let slowestRange = eligibleRanges.min(by: { $0.minFrameRate < $1.minFrameRate }) else {
+                return nil
+            }
+            return (format, dimensions, maximumFrameRate, slowestRange.minFrameRate, slowestRange.maxFrameDuration)
+        }
+
+        guard let selection = candidates.max(by: { lhs, rhs in
+            let lhsPixels = Double(lhs.1.width) * Double(lhs.1.height)
+            let rhsPixels = Double(rhs.1.width) * Double(rhs.1.height)
+            if lhsPixels != rhsPixels { return lhsPixels < rhsPixels }
+            return lhs.2 < rhs.2
+        }) else {
+            throw CameraSetupError.noThirtyFPSFormat
+        }
+
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+        device.activeFormat = selection.0
+        device.activeVideoMinFrameDuration = selection.4
+        device.activeVideoMaxFrameDuration = selection.4
+
+        logger.info("Selected format \(selection.1.width)x\(selection.1.height) targetFPS=\(selection.3, format: .fixed(precision: 2)) maxFPS=\(selection.2, format: .fixed(precision: 2))")
+        return selection.0
+    }
+}
+
+private enum CameraSetupError: LocalizedError {
+    case noThirtyFPSFormat
+
+    var errorDescription: String? {
+        switch self {
+        case .noThirtyFPSFormat:
+            return "The Desk View camera did not report a video format capable of 30 frames per second."
         }
     }
 }
