@@ -368,7 +368,7 @@ private struct SetupSidebar: View {
                 }
 
                 if camera.penTrackingState == .lost {
-                    Text("The previous build failed silently here. Select the visible tip again to resume.")
+                    Text("Keep the pen still on the paper, then select its visible tip again.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
