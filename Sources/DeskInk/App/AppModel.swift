@@ -441,6 +441,10 @@ final class AppModel: ObservableObject {
                 user: recordingUserMetadata
             )
             let sessionURL = try sessionRecorder.start(in: parentURL, metadata: metadata)
+            sessionRecorder.recordSpaceState(
+                isDown: isSpacePressed,
+                hostTimestamp: LatencyMonitor.hostTimestampNow()
+            )
             recordingParentURL = parentURL
             recordingUsesSecurityScope = accessed
             isSessionRecording = true
@@ -544,6 +548,9 @@ final class AppModel: ObservableObject {
                     traceID: observation.traceID,
                     decisionHostTimestamp: LatencyMonitor.hostTimestampNow(),
                     inferredPenDown: observation.inferredDown,
+                    effectivePenDown: penDownMode == .automatic
+                        ? observation.inferredDown
+                        : isSpacePressed,
                     acceptedForInk: acceptedForInk,
                     activeStrokeID: activeStroke?.id
                 )

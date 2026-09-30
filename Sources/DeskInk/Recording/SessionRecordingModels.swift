@@ -172,6 +172,7 @@ struct SessionFrameDecision: Equatable, Sendable {
     let traceID: FrameTraceID
     let decisionHostTimestamp: TimeInterval
     let inferredPenDown: Bool
+    let effectivePenDown: Bool
     let acceptedForInk: Bool
     let activeStrokeID: UUID?
 
@@ -179,12 +180,14 @@ struct SessionFrameDecision: Equatable, Sendable {
         traceID: FrameTraceID,
         decisionHostTimestamp: TimeInterval,
         inferredPenDown: Bool,
+        effectivePenDown: Bool? = nil,
         acceptedForInk: Bool,
         activeStrokeID: UUID? = nil
     ) {
         self.traceID = traceID
         self.decisionHostTimestamp = decisionHostTimestamp
         self.inferredPenDown = inferredPenDown
+        self.effectivePenDown = effectivePenDown ?? acceptedForInk
         self.acceptedForInk = acceptedForInk
         self.activeStrokeID = activeStrokeID
     }

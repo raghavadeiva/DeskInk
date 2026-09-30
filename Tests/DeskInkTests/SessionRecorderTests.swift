@@ -87,6 +87,7 @@ struct SessionRecorderTests {
                 traceID: traceID,
                 decisionHostTimestamp: 100.28,
                 inferredPenDown: true,
+                effectivePenDown: true,
                 acceptedForInk: true,
                 activeStrokeID: strokeID
             )
@@ -129,6 +130,7 @@ struct SessionRecorderTests {
         #expect(presentationTime["epoch"] as? Int == 7)
         let application = try #require(framePayload["application"] as? [String: Any])
         #expect(application["inferredPenDown"] as? Bool == true)
+        #expect(application["effectivePenDown"] as? Bool == true)
         #expect(application["acceptedForInk"] as? Bool == true)
 
         let spaces = events.filter { $0["type"] as? String == "spaceState" }

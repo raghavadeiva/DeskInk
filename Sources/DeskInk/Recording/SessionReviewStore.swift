@@ -391,7 +391,9 @@ final class SessionReviewStore: ObservableObject {
                 confidence: frame.payload.camera?.trackerOutput.confidence,
                 rawSpaceDown: spaceState,
                 inferredContact: frame.payload.application?.inferredPenDown,
-                recordedEffectiveContact: frame.payload.application?.acceptedForInk,
+                recordedEffectiveContact: frame.payload.application.map {
+                    $0.effectivePenDown ?? $0.acceptedForInk
+                },
                 tipCropRelativePath: cropReference?.relativePath,
                 tipCropURL: cropURL,
                 tipCropStatus: cropStatus,
@@ -525,6 +527,7 @@ private struct ReviewTrackerOutput: Decodable {
 private struct ReviewApplicationRecord: Decodable {
     let decisionHostTimestamp: TimeInterval
     let inferredPenDown: Bool
+    let effectivePenDown: Bool?
     let acceptedForInk: Bool
 }
 

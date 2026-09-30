@@ -792,12 +792,14 @@ private struct TrackerOutputRecord: Encodable {
 private struct FrameApplicationRecord: Encodable {
     let decisionHostTimestamp: TimeInterval
     let inferredPenDown: Bool
+    let effectivePenDown: Bool
     let acceptedForInk: Bool
     let activeStrokeID: UUID?
 
     init(_ decision: SessionFrameDecision) {
         decisionHostTimestamp = decision.decisionHostTimestamp
         inferredPenDown = decision.inferredPenDown
+        effectivePenDown = decision.effectivePenDown
         acceptedForInk = decision.acceptedForInk
         activeStrokeID = decision.activeStrokeID
     }
