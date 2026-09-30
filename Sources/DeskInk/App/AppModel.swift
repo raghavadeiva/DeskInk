@@ -12,7 +12,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeStroke: InkStroke?
 
     @Published var inputMode: InputMode = .simulator
-    @Published var penDownMode: PenDownMode = .automatic
+    @Published var penDownMode: PenDownMode = .holdSpace
     @Published var inkColor: InkColorChoice = .blue
     @Published var calibrationCorners: [NormalizedPoint] = []
     @Published var cameraInteraction: CameraInteraction = .idle
