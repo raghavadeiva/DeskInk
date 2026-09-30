@@ -98,6 +98,12 @@ enum PenDownMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum SpaceKeyEventSource: String, Codable, Sendable {
+    case keyDown
+    case keyUp
+    case focusLossReset
+}
+
 enum CameraInteraction: Equatable {
     case idle
     case calibrating

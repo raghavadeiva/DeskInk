@@ -34,9 +34,14 @@ final class AppModel: ObservableObject {
         camera.onObservation = { [weak self] observation in
             self?.consume(observation)
         }
-        spaceKeyMonitor = SpaceKeyMonitor { [weak self] isPressed in
+        spaceKeyMonitor = SpaceKeyMonitor { [weak self] isPressed, eventTimestamp, hostTimestamp, source in
             let shouldConsume = self?.inputMode == .deskView && self?.penDownMode == .holdSpace
-            self?.spaceKeyChanged(isPressed)
+            self?.spaceKeyChanged(
+                isPressed,
+                eventTimestamp: eventTimestamp,
+                hostTimestamp: hostTimestamp,
+                source: source
+            )
             return shouldConsume
         }
     }
@@ -346,7 +351,12 @@ final class AppModel: ObservableObject {
         self.activeStroke = nil
     }
 
-    private func spaceKeyChanged(_ pressed: Bool) {
+    private func spaceKeyChanged(
+        _ pressed: Bool,
+        eventTimestamp: TimeInterval,
+        hostTimestamp: TimeInterval,
+        source: SpaceKeyEventSource
+    ) {
         isSpacePressed = pressed
         if !pressed, penDownMode == .holdSpace {
             finishActiveStroke()
@@ -391,29 +401,60 @@ private enum DeskInkError: LocalizedError {
 private final class SpaceKeyMonitor {
     private var keyDownMonitor: Any?
     private var keyUpMonitor: Any?
-    private let onChange: (Bool) -> Bool
+    private var resignObserver: NSObjectProtocol?
+    private var transitionState = SpaceKeyTransitionState()
+    private var consumesSpace = false
+    private let onChange: (Bool, TimeInterval, TimeInterval, SpaceKeyEventSource) -> Bool
 
-    init(onChange: @escaping (Bool) -> Bool) {
+    init(onChange: @escaping (Bool, TimeInterval, TimeInterval, SpaceKeyEventSource) -> Bool) {
         self.onChange = onChange
         keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 49 else { return event }
-            let shouldConsume: Bool
-            if !event.isARepeat {
-                shouldConsume = self?.onChange(true) ?? false
-            } else {
-                shouldConsume = self?.onChange(true) ?? false
+            guard let self else { return event }
+            guard self.transitionState.keyDown(isRepeat: event.isARepeat) else {
+                return self.consumesSpace ? nil : event
             }
+            let shouldConsume = self.onChange(
+                true,
+                event.timestamp,
+                LatencyMonitor.hostTimestampNow(),
+                .keyDown
+            )
+            self.consumesSpace = shouldConsume
             return shouldConsume ? nil : event
         }
         keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
             guard event.keyCode == 49 else { return event }
-            let shouldConsume = self?.onChange(false) ?? false
+            guard let self else { return event }
+            guard self.transitionState.keyUp() else {
+                return self.consumesSpace ? nil : event
+            }
+            let shouldConsume = self.onChange(
+                false,
+                event.timestamp,
+                LatencyMonitor.hostTimestampNow(),
+                .keyUp
+            )
+            self.consumesSpace = false
             return shouldConsume ? nil : event
+        }
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.transitionState.resetForFocusLoss() else { return }
+                self.consumesSpace = false
+                let hostTimestamp = LatencyMonitor.hostTimestampNow()
+                _ = self.onChange(false, hostTimestamp, hostTimestamp, .focusLossReset)
+            }
         }
     }
 
     deinit {
         if let keyDownMonitor { NSEvent.removeMonitor(keyDownMonitor) }
         if let keyUpMonitor { NSEvent.removeMonitor(keyUpMonitor) }
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
     }
 }
