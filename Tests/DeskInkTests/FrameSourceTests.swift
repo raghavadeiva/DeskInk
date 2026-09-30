@@ -24,6 +24,7 @@ struct FrameSourceTests {
 private final class StubFrameSource: FrameSource {
     let session = AVCaptureSession()
     var onFrame: ((CapturedVideoFrame) -> Void)?
+    var onFrameDrop: (() -> Void)?
     var onStateChange: ((CameraRunState) -> Void)?
     var onConfigurationChange: ((CaptureDeviceDescriptor) -> Void)?
 

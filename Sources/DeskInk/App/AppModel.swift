@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var currentPageIndex = 0
     @Published private(set) var strokes: [InkStroke] = []
     @Published private(set) var activeStroke: InkStroke?
+    @Published private(set) var renderTicket: FrameTraceID?
 
     @Published var inputMode: InputMode = .simulator
     @Published var penDownMode: PenDownMode = .holdSpace
@@ -20,12 +21,16 @@ final class AppModel: ObservableObject {
     @Published var presentedError: String?
     @Published private(set) var statusMessage = "Open a PDF to begin."
 
-    let camera = CameraController()
+    let latencyMonitor: LatencyMonitor
+    let camera: CameraController
 
     private var spaceKeyMonitor: SpaceKeyMonitor?
     private var automaticPreRoll: [NormalizedPoint] = []
 
     init() {
+        let latencyMonitor = LatencyMonitor()
+        self.latencyMonitor = latencyMonitor
+        camera = CameraController(latencyMonitor: latencyMonitor)
         camera.onObservation = { [weak self] observation in
             self?.consume(observation)
         }
@@ -265,6 +270,14 @@ final class AppModel: ObservableObject {
     }
 
     private func consume(_ observation: PenObservation) {
+        let visiblePointCountBefore = currentVisibleInkPointCount
+        defer {
+            if currentVisibleInkPointCount > visiblePointCountBefore {
+                renderTicket = observation.traceID
+            } else {
+                latencyMonitor.markNotRendered(traceID: observation.traceID)
+            }
+        }
         guard inputMode == .deskView, hasDocument else { return }
 
         guard let point = observation.paperPoint else {
@@ -349,6 +362,14 @@ final class AppModel: ObservableObject {
             result.append(point)
         }
         return result
+    }
+
+    private var currentVisibleInkPointCount: Int {
+        let committed = currentPageStrokes.reduce(into: 0) { count, stroke in
+            count += stroke.points.count
+        }
+        let active = activeStroke?.pageIndex == currentPageIndex ? activeStroke?.points.count ?? 0 : 0
+        return committed + active
     }
 }
 

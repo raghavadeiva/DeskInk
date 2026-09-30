@@ -17,6 +17,7 @@ final class CameraController: ObservableObject {
     var onObservation: ((PenObservation) -> Void)?
 
     private let frameSource: FrameSource
+    let latencyMonitor: LatencyMonitor
 
     private var sequenceHandler = VNSequenceRequestHandler()
     private var trackedObject: VNDetectedObjectObservation?
@@ -26,10 +27,17 @@ final class CameraController: ObservableObject {
     private var smoothedCameraPoint: NormalizedPoint?
     private var consecutiveLostFrames = 0
 
-    init(frameSource: FrameSource = AVCaptureFrameSource()) {
+    init(
+        frameSource: FrameSource = AVCaptureFrameSource(),
+        latencyMonitor: LatencyMonitor = LatencyMonitor()
+    ) {
         self.frameSource = frameSource
+        self.latencyMonitor = latencyMonitor
         frameSource.onFrame = { [weak self] frame in
             self?.process(frame)
+        }
+        frameSource.onFrameDrop = { [weak latencyMonitor] in
+            latencyMonitor?.markCaptureDrop()
         }
         frameSource.onStateChange = { [weak self] state in
             self?.state = state
@@ -93,9 +101,15 @@ final class CameraController: ObservableObject {
 
     private func process(_ frame: CapturedVideoFrame) {
         let pixelBuffer = frame.pixelBuffer
-        let timestamp = frame.presentationTimestamp
+        let timestamp = frame.presentationTime.seconds
+        latencyMonitor.markCapture(
+            traceID: frame.traceID,
+            callbackHostTimestamp: frame.callbackHostTimestamp,
+            presentationHostTimestamp: frame.presentationHostTimestamp,
+            clockRelation: frame.clockRelation
+        )
 
-        if paperTransform == nil, frame.index.isMultiple(of: 15) {
+        if paperTransform == nil, frame.traceID.frameIndex.isMultiple(of: 15) {
             detectPaper(in: pixelBuffer)
         }
 
@@ -115,11 +129,16 @@ final class CameraController: ObservableObject {
         }
 
         guard let trackedObject else {
+            latencyMonitor.markTrackerResult(traceID: frame.traceID)
             publishObservation(
                 PenObservation(
+                    traceID: frame.traceID,
+                    rawCameraPoint: nil,
                     cameraPoint: nil,
+                    rawPaperPoint: nil,
                     paperPoint: nil,
                     confidence: 0,
+                    trackerKind: "vision",
                     inferredDown: contactState.update(point: nil, confidence: 0, timestamp: timestamp),
                     timestamp: timestamp
                 )
@@ -135,7 +154,11 @@ final class CameraController: ObservableObject {
             guard let result = request.results?.first as? VNDetectedObjectObservation,
                   !request.isLastFrame,
                   result.confidence >= 0.15 else {
-                handleWeakTracking(result: request.results?.first as? VNDetectedObjectObservation, timestamp: timestamp)
+                handleWeakTracking(
+                    result: request.results?.first as? VNDetectedObjectObservation,
+                    frame: frame,
+                    timestamp: timestamp
+                )
                 return
             }
 
@@ -146,6 +169,7 @@ final class CameraController: ObservableObject {
                 y: 1 - result.boundingBox.midY
             )
             let filteredPoint = smooth(rawPoint)
+            let rawMappedPoint = paperTransform?.applying(to: rawPoint)
             let mappedPoint = paperTransform?.applying(to: filteredPoint)
             let pointOnPaper: NormalizedPoint?
             if let mappedPoint,
@@ -166,17 +190,22 @@ final class CameraController: ObservableObject {
                 timestamp: timestamp
             )
 
+            latencyMonitor.markTrackerResult(traceID: frame.traceID)
             publishObservation(
                 PenObservation(
+                    traceID: frame.traceID,
+                    rawCameraPoint: rawPoint,
                     cameraPoint: filteredPoint,
+                    rawPaperPoint: rawMappedPoint,
                     paperPoint: pointOnPaper,
                     confidence: confidence,
+                    trackerKind: "vision",
                     inferredDown: isDown,
                     timestamp: timestamp
                 )
             )
         } catch {
-            handleWeakTracking(result: nil, timestamp: timestamp)
+            handleWeakTracking(result: nil, frame: frame, timestamp: timestamp)
         }
     }
 
@@ -222,7 +251,11 @@ final class CameraController: ObservableObject {
         return filtered
     }
 
-    private func handleWeakTracking(result: VNDetectedObjectObservation?, timestamp: TimeInterval) {
+    private func handleWeakTracking(
+        result: VNDetectedObjectObservation?,
+        frame: CapturedVideoFrame,
+        timestamp: TimeInterval
+    ) {
         consecutiveLostFrames += 1
         if let result {
             trackedObject = result
@@ -233,11 +266,19 @@ final class CameraController: ObservableObject {
             sequenceHandler = VNSequenceRequestHandler()
             smoothedCameraPoint = nil
         }
+        let rawPoint = result.map {
+            NormalizedPoint(x: $0.boundingBox.midX, y: 1 - $0.boundingBox.midY)
+        }
+        latencyMonitor.markTrackerResult(traceID: frame.traceID)
         publishObservation(
             PenObservation(
+                traceID: frame.traceID,
+                rawCameraPoint: rawPoint,
                 cameraPoint: nil,
+                rawPaperPoint: rawPoint.flatMap { paperTransform?.applying(to: $0) },
                 paperPoint: nil,
-                confidence: 0,
+                confidence: Double(result?.confidence ?? 0),
+                trackerKind: "vision",
                 inferredDown: down,
                 timestamp: timestamp
             )

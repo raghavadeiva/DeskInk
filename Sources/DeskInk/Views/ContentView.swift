@@ -141,6 +141,8 @@ struct ContentView: View {
                 activeStroke: model.activeStroke,
                 isSimulatorEnabled: model.inputMode == .simulator,
                 currentInkColor: model.inkColor,
+                renderTicket: model.renderTicket,
+                latencyMonitor: model.latencyMonitor,
                 onCompletedStroke: model.commitSimulatorStroke
             )
 
@@ -231,6 +233,7 @@ private struct SetupSidebar: View {
                     cameraPreview
                     calibrationSection
                     trackingSection
+                    LatencyDebugPanel(monitor: model.latencyMonitor)
                 } else {
                     simulatorSection
                 }
@@ -526,5 +529,70 @@ private struct StepStatusRow: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+private struct LatencyDebugPanel: View {
+    @ObservedObject var monitor: LatencyMonitor
+    @State private var isExpanded = false
+
+    var body: some View {
+        GroupBox {
+            DisclosureGroup("Software latency", isExpanded: $isExpanded) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Clock")
+                        Spacer()
+                        Text(monitor.snapshot.clockRelation.label)
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+
+                    Grid(alignment: .trailing, horizontalSpacing: 10, verticalSpacing: 5) {
+                        GridRow {
+                            Text("Stage").gridColumnAlignment(.leading)
+                            Text("p50")
+                            Text("p95")
+                            Text("p99")
+                            Text("n")
+                        }
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                        ForEach(LatencyStage.allCases, id: \.self) { stage in
+                            let values = monitor.snapshot.stages[stage] ?? LatencyPercentiles()
+                            GridRow {
+                                Text(stage.rawValue).gridColumnAlignment(.leading)
+                                Text(milliseconds(values.p50Milliseconds))
+                                Text(milliseconds(values.p95Milliseconds))
+                                Text(values.sampleCount >= 100 ? milliseconds(values.p99Milliseconds) : "warming")
+                                Text("\(values.sampleCount)")
+                            }
+                            .font(.caption2.monospacedDigit())
+                        }
+                    }
+
+                    Text("Captured \(monitor.snapshot.capturedFrames) · committed \(monitor.snapshot.committedFrames) · dropped \(monitor.snapshot.captureDrops) · coalesced \(monitor.snapshot.coalescedFrames) · invalid \(monitor.snapshot.invalidTraces)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack {
+                        Button("Reset Window") { monitor.reset() }
+                        Spacer()
+                    }
+                    Text("Software timing only; camera exposure, display scan-out, and glass-to-glass latency are not measured.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func milliseconds(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.1f", value)
     }
 }

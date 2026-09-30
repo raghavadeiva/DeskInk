@@ -56,9 +56,11 @@ struct CaptureDeviceDescriptor: Codable, Equatable, Sendable {
 }
 
 struct CapturedVideoFrame {
-    let index: Int
+    let traceID: FrameTraceID
     let pixelBuffer: CVPixelBuffer
-    let presentationTimestamp: TimeInterval
+    let presentationTime: CMTime
+    let presentationHostTimestamp: TimeInterval?
+    let clockRelation: CaptureClockRelation
     let callbackHostTimestamp: TimeInterval
 }
 
@@ -67,6 +69,7 @@ struct CapturedVideoFrame {
 protocol FrameSource: AnyObject {
     var session: AVCaptureSession { get }
     var onFrame: ((CapturedVideoFrame) -> Void)? { get set }
+    var onFrameDrop: (() -> Void)? { get set }
     var onStateChange: ((CameraRunState) -> Void)? { get set }
     var onConfigurationChange: ((CaptureDeviceDescriptor) -> Void)? { get set }
 
@@ -80,6 +83,7 @@ final class AVCaptureFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutpu
     let session = AVCaptureSession()
 
     var onFrame: ((CapturedVideoFrame) -> Void)?
+    var onFrameDrop: (() -> Void)?
     var onStateChange: ((CameraRunState) -> Void)?
     var onConfigurationChange: ((CaptureDeviceDescriptor) -> Void)?
 
@@ -89,6 +93,7 @@ final class AVCaptureFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutpu
     private let logger = Logger(subsystem: "com.example.DeskInk", category: "Camera")
     private var configured = false
     private var frameIndex = 0
+    private var captureSessionID = UUID()
 
     func start() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -147,20 +152,34 @@ final class AVCaptureFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutpu
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         frameIndex += 1
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let clockMapping = mappedPresentationTimeToHost(presentationTime)
         onFrame?(
             CapturedVideoFrame(
-                index: frameIndex,
+                traceID: FrameTraceID(captureSessionID: captureSessionID, frameIndex: frameIndex),
                 pixelBuffer: pixelBuffer,
-                presentationTimestamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds,
+                presentationTime: presentationTime,
+                presentationHostTimestamp: clockMapping.timestamp,
+                clockRelation: clockMapping.relation,
                 callbackHostTimestamp: Self.hostTimestamp()
             )
         )
+    }
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didDrop sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        onFrameDrop?()
     }
 
     private func configureAndStart() {
         publishState(.starting)
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.captureSessionID = UUID()
+            self.frameIndex = 0
 
             if self.configured {
                 if !self.session.isRunning {
@@ -301,6 +320,30 @@ final class AVCaptureFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutpu
 
     private static func hostTimestamp() -> TimeInterval {
         CMClockGetTime(CMClockGetHostTimeClock()).seconds
+    }
+
+    private func mappedPresentationTimeToHost(_ presentationTime: CMTime) -> (
+        timestamp: TimeInterval?,
+        relation: CaptureClockRelation
+    ) {
+        guard presentationTime.isValid, presentationTime.isNumeric else {
+            return (nil, .invalid)
+        }
+        guard let synchronizationClock = session.synchronizationClock else {
+            return (nil, .unverified)
+        }
+        let hostClock = CMClockGetHostTimeClock()
+        if CFEqual(synchronizationClock, hostClock) {
+            return (presentationTime.seconds, .hostClock)
+        }
+        let converted = CMSyncConvertTime(presentationTime, from: synchronizationClock, to: hostClock)
+        guard converted.isValid, converted.isNumeric else {
+            return (nil, .invalid)
+        }
+        return (
+            converted.seconds,
+            .convertedToHost(mightDrift: CMSyncMightDrift(synchronizationClock, hostClock))
+        )
     }
 }
 

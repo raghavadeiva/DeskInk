@@ -73,9 +73,13 @@ struct InkStroke: Identifiable, Sendable {
 }
 
 struct PenObservation: Sendable {
+    let traceID: FrameTraceID
+    let rawCameraPoint: NormalizedPoint?
     let cameraPoint: NormalizedPoint?
+    let rawPaperPoint: NormalizedPoint?
     let paperPoint: NormalizedPoint?
     let confidence: Double
+    let trackerKind: String
     let inferredDown: Bool
     let timestamp: TimeInterval
 }

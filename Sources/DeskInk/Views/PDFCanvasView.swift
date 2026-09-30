@@ -9,11 +9,14 @@ struct PDFCanvasRepresentable: NSViewRepresentable {
     let activeStroke: InkStroke?
     let isSimulatorEnabled: Bool
     let currentInkColor: InkColorChoice
+    let renderTicket: FrameTraceID?
+    let latencyMonitor: LatencyMonitor
     let onCompletedStroke: ([NormalizedPoint]) -> Void
 
     func makeNSView(context: Context) -> PDFInkCanvasView {
         let view = PDFInkCanvasView()
         view.onCompletedStroke = onCompletedStroke
+        view.latencyMonitor = latencyMonitor
         return view
     }
 
@@ -25,6 +28,8 @@ struct PDFCanvasRepresentable: NSViewRepresentable {
         view.isSimulatorEnabled = isSimulatorEnabled
         view.currentInkColor = currentInkColor
         view.onCompletedStroke = onCompletedStroke
+        view.latencyMonitor = latencyMonitor
+        view.acceptRenderTicket(renderTicket)
         view.needsDisplay = true
         view.window?.invalidateCursorRects(for: view)
     }
@@ -38,8 +43,11 @@ final class PDFInkCanvasView: NSView {
     var isSimulatorEnabled = false
     var currentInkColor: InkColorChoice = .blue
     var onCompletedStroke: (([NormalizedPoint]) -> Void)?
+    var latencyMonitor: LatencyMonitor?
 
     private var draftPoints: [NormalizedPoint] = []
+    private var pendingRenderTicket: FrameTraceID?
+    private var lastAcceptedRenderTicket: FrameTraceID?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -49,6 +57,13 @@ final class PDFInkCanvasView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        let committedTicket = pendingRenderTicket
+        defer {
+            if let committedTicket {
+                pendingRenderTicket = nil
+                latencyMonitor?.markOverlayCommit(traceID: committedTicket)
+            }
+        }
         NSColor.underPageBackgroundColor.setFill()
         bounds.fill()
 
@@ -134,6 +149,16 @@ final class PDFInkCanvasView: NSView {
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: isSimulatorEnabled ? .crosshair : .arrow)
+    }
+
+    func acceptRenderTicket(_ ticket: FrameTraceID?) {
+        guard let ticket, ticket != lastAcceptedRenderTicket else { return }
+        if let pendingRenderTicket, pendingRenderTicket != ticket {
+            latencyMonitor?.markCoalesced(traceID: pendingRenderTicket)
+        }
+        pendingRenderTicket = ticket
+        lastAcceptedRenderTicket = ticket
+        latencyMonitor?.markRenderHandoff(traceID: ticket)
     }
 
     private func draw(stroke: InkStroke, in pageRect: CGRect, pageSize: CGSize) {
