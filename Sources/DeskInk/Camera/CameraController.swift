@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import OSLog
 import Vision
 
 enum CameraRunState: Equatable {
@@ -62,6 +63,7 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
     private let sessionQueue = DispatchQueue(label: "com.example.DeskInk.capture.session")
     private let videoQueue = DispatchQueue(label: "com.example.DeskInk.capture.frames")
     private let output = AVCaptureVideoDataOutput()
+    private let logger = Logger(subsystem: "com.example.DeskInk", category: "Camera")
 
     private var sequenceHandler = VNSequenceRequestHandler()
     private var trackedObject: VNDetectedObjectObservation?
@@ -185,6 +187,7 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
                 ))
                 return
             }
+            self.logDiscoveredDevice(device)
 
             do {
                 let input = try AVCaptureDeviceInput(device: device)
@@ -425,6 +428,18 @@ final class CameraController: NSObject, ObservableObject, AVCaptureVideoDataOutp
         let aspectRatio = Double(dimensions.width) / Double(dimensions.height)
         DispatchQueue.main.async { [weak self] in
             self?.activeVideoAspectRatio = aspectRatio
+        }
+    }
+
+    private func logDiscoveredDevice(_ device: AVCaptureDevice) {
+        logger.info("Discovered camera name=\(device.localizedName, privacy: .public) modelID=\(device.modelID, privacy: .public) uniqueID=\(device.uniqueID, privacy: .public)")
+
+        for (index, format) in device.formats.enumerated() {
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let maximumFrameRate = format.videoSupportedFrameRateRanges
+                .map(\.maxFrameRate)
+                .max() ?? 0
+            logger.info("Available format[\(index)] \(dimensions.width)x\(dimensions.height) maxFPS=\(maximumFrameRate, format: .fixed(precision: 2))")
         }
     }
 }
