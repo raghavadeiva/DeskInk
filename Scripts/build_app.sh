@@ -26,9 +26,9 @@ fi
 
 export CLANG_MODULE_CACHE_PATH="$project_root/.build/clang-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$project_root/.build/swiftpm-module-cache"
-swift build -c "$configuration"
+swift build -c "$configuration" --disable-sandbox
 
-binary_path="$(swift build -c "$configuration" --show-bin-path)/DeskInk"
+binary_path="$(swift build -c "$configuration" --disable-sandbox --show-bin-path)/DeskInk"
 app_path="$project_root/build/DeskInk.app"
 contents_path="$app_path/Contents"
 

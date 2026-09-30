@@ -42,10 +42,12 @@ For development:
 
 ```sh
 swift build
-swift test
+./Scripts/test.sh
 ```
 
 You can also open `Package.swift` in Xcode for editing. Run the bundled app made by the script when testing camera permission, because it contains the intended `Info.plist` and entitlements.
+
+`Scripts/test.sh` also supports Command Line Tools-only installations whose default SDK or Swift Testing macro path does not match the active compiler. Full Xcode remains recommended for real camera testing.
 
 ## First run without Desk View
 
@@ -69,6 +71,19 @@ This path is the fastest way to verify the app and does not ask for camera acces
 For the cleanest tracking, use even lighting, a visually distinctive pen against plain paper, keep fingers a short distance behind the tip, and avoid covering the tip during the initial seed.
 
 If the preview says **Outside paper**, recalibrate the sheet. If it says **Tracking lost**, click **Select Pen Tip** and seed the visible tip again. If **Auto (experimental)** does not reliably show **Ink down** with your lighting and pen, switch to **Hold Space**; the same calibrated tracking and export path are used, but Space explicitly controls contact.
+
+## Measurement and recording tools
+
+DeskInk now includes a local lab harness for collecting the real data needed to improve tracking:
+
+- **Software latency** expands in the Desk View sidebar and reports p50/p95/p99 for the capture, tracking, render hand-off, and overlay-draw portions of the pipeline. These are software timings, not glass-to-glass display latency.
+- **Session recording** is off by default. Fill in the setup fields, turn on Record session, and choose a folder. A red `REC` indicator remains visible while the app writes a capped, local-only `.deskink-session` folder. No recording is uploaded.
+- **Review Recorded Session…** opens the captured tip crops and lets you append Contact, Hover, Uncertain, or Revert corrections. Corrections are written to a sidecar; the raw Space events and frame log are never overwritten.
+- **Grid accuracy test** generates a printable Letter or A4 5 × 5 target. Print at Actual Size / 100%, verify the 100 mm ruler, calibrate the sheet, select the tip, then hold Space on each cross for at least one second. Exported CSVs report x/y/radial error in real millimetres plus mean, p95, and max.
+
+The current Vision tracker still follows the center of a seeded object box rather than a proven physical nib point. The new tools measure that limitation; they do not claim it is solved. Keep **Hold Space** selected until recorded evidence supports a safer automatic-contact mode.
+
+The complete Phase 0 verification, implementation notes, current test numbers, and exact first hardware checkpoint are in [Docs/PHASE_0_1_REPORT.md](Docs/PHASE_0_1_REPORT.md).
 
 ## What “automatic pen-down” means here
 
@@ -101,11 +116,14 @@ Official references:
 
 ```text
 Sources/DeskInk/
+  Accuracy/     printable fixture, grid reducer, and millimetre CSV export
   App/          app lifecycle and workspace state
   Camera/       Desk View capture, paper detection, Vision tracking
+  Instrumentation/ software-latency trace aggregation
   Math/         projective transform / homography
   Models/       normalized points, strokes, workflow enums
   PDF/          vector-annotation export
+  Recording/    local session recorder and append-only label review
   Tracking/     pen-down inference state machine
   Views/        SwiftUI workspace and AppKit camera/PDF surfaces
 Tests/DeskInkTests/
@@ -123,5 +141,9 @@ The automated suite covers:
 - acceptance of the same low-confidence observations published by Vision tracking;
 - pointer drag and single-click simulator input through the real AppKit view;
 - PDF cloning, vector ink annotation creation, serialization, reopen, and rendered-pixel visibility in both Light and Dark appearance.
+- bounded recorder cadence/disk behavior, frame telemetry, and immutable raw logs;
+- append-only review corrections, truncated-log recovery, and timestamped Space projection;
+- exact Letter/A4 fixture geometry, orientation, one-second sampling gates, robust medians, physical-millimetre errors, and CSV summaries;
+- frame-source injection, host-clock latency stage aggregation, and Space-key transition deduplication.
 
-Camera quality and end-to-end latency still require a physical Desk View-capable Mac. A practical hardware acceptance test is to mark a physical 3×3 grid, export it, and measure drift across the PDF; then test hover/lift behavior, page edges, occlusion, camera disconnect/reconnect, and both camera-permission states.
+Camera quality, physical accuracy, and end-to-end latency still require a physical Desk View-capable Mac. Follow Human Checkpoint 1 in the phase report rather than inferring results from synthetic tests.
